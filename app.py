@@ -209,7 +209,7 @@ if page == "Home":
         "- Useful for research and education"
     )
 
-    st.subheader("How it works (simple)")
+    st.subheader("How it works")
     st.write(
         "1. Upload a short audio clip.\n"
         "2. The system extracts compact sound features (MFCCs).\n"
