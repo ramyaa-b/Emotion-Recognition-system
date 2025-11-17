@@ -1,9 +1,9 @@
 streamlit>=1.18
 tensorflow==2.20.0
 numpy
+pandas
 librosa
 soundfile
-pandas
-joblib
-
-
+plotly
+matplotlib
+seaborn
