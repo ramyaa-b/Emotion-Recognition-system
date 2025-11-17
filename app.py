@@ -1,5 +1,7 @@
-# app.py — FINAL WORKING VERSION
-# Beautiful UI + Correct Preprocessing + Accurate Predictions
+# app.py — Final robust version (pink UI, safe audio handling, correct preprocessing)
+# - Uses MFCC collapse (mean across time) to form (1,40,1) input for your model
+# - Adds safe fallbacks for empty/short/corrupt audio to avoid resample errors
+# - Keeps Home, Make Prediction, About pages and the pink theme
 
 import streamlit as st
 import numpy as np
@@ -12,7 +14,6 @@ import librosa
 import soundfile as sf
 from tensorflow.keras.models import load_model
 import plotly.express as px
-import plotly.graph_objects as go
 
 # --------------------------------------------------------
 # PAGE CONFIG + PINK THEME
@@ -28,7 +29,7 @@ PINK = {
     "text": "#3d1f33",
 }
 
-# CSS
+# CSS styling
 st.markdown(
     f"""
     <style>
@@ -75,69 +76,112 @@ SR = 22050
 N_MFCC = 40
 MODEL_PATH = "model.h5"
 
-# Your actual class order (from your working minimal code)
+# Class order must match your model's training order
 EMO_LABELS = [
     "neutral", "calm", "happy", "sad", "angry", "fearful", "disgust", "surprised"
 ]
 
 # --------------------------------------------------------
-# LOAD MODEL
+# MODEL LOADER
 # --------------------------------------------------------
 @st.cache_resource
 def load_emotion_model():
     p = pathlib.Path(MODEL_PATH)
     if not p.exists():
-        raise FileNotFoundError("model.h5 not found. Upload it to repo root.")
+        raise FileNotFoundError("model.h5 not found. Upload it to repository root.")
     return load_model(str(p))
 
 # --------------------------------------------------------
-# AUDIO HELPERS
+# SAFE AUDIO & MFCC HELPERS
 # --------------------------------------------------------
 def read_audio(file_bytes):
-    """Return mono signal and sample rate."""
+    """
+    Read bytes to mono signal and sample rate.
+    If reading fails or signal is too short, returns 0.5s of silence at SR.
+    """
     try:
         with io.BytesIO(file_bytes) as f:
             signal, sr = sf.read(f)
+        # convert to mono
         if signal.ndim > 1:
             signal = np.mean(signal, axis=1)
-    except:
-        return np.zeros(SR, dtype=np.float32), SR
-    return signal.astype(np.float32), sr
+        signal = signal.astype(np.float32)
+        # If extremely short or empty, use 0.5s silence
+        if signal.size < 256:
+            return np.zeros(int(0.5 * SR), dtype=np.float32), SR
+        return signal, sr
+    except Exception:
+        # fallback silent buffer
+        return np.zeros(int(0.5 * SR), dtype=np.float32), SR
 
 def compute_mfcc(file_bytes):
-    """Compute MFCC exactly like your working script."""
-    sig, sr = read_audio(file_bytes)
-    if sr != SR:
-        sig = librosa.resample(sig, sr, SR)
+    """
+    Compute MFCC safely.
+    Returns an array of shape (N_MFCC, frames>=1).
+    If anything fails, returns zeros (N_MFCC, 1).
+    """
+    try:
+        sig, sr = read_audio(file_bytes)
+        # safe resample: handle tiny signals and exceptions
+        try:
+            if sr != SR:
+                if sig.size < 3:
+                    sig = np.zeros(int(0.5 * SR), dtype=np.float32)
+                sig = librosa.resample(sig, orig_sr=sr, target_sr=SR)
+        except Exception:
+            sig = np.zeros(int(0.5 * SR), dtype=np.float32)
 
-    mfcc = librosa.feature.mfcc(y=sig, sr=SR, n_mfcc=N_MFCC)
-    return mfcc
+        # compute MFCC
+        try:
+            mfcc = librosa.feature.mfcc(y=sig, sr=SR, n_mfcc=N_MFCC)
+            # ensure at least one frame
+            if mfcc.shape[1] < 1:
+                mfcc = np.zeros((N_MFCC, 1), dtype=np.float32)
+            return mfcc
+        except Exception:
+            return np.zeros((N_MFCC, 1), dtype=np.float32)
+
+    except Exception:
+        return np.zeros((N_MFCC, 1), dtype=np.float32)
 
 def prepare_input(mfcc):
-    """The KEY step: collapse MFCC time axis → match your model."""
-    collapsed = np.mean(mfcc, axis=1, keepdims=True)  # (40,1)
-    x = np.expand_dims(collapsed, axis=0)             # (1,40,1)
-    return x.astype(np.float32)
+    """
+    Collapse time axis by mean (this matches the working minimal script).
+    Returns shaped input (1, N_MFCC, 1)
+    """
+    try:
+        # mfcc shape (N_MFCC, frames)
+        collapsed = np.mean(mfcc, axis=1, keepdims=True)   # (N_MFCC, 1)
+        x = np.expand_dims(collapsed, axis=0)               # (1, N_MFCC, 1)
+        return x.astype(np.float32)
+    except Exception:
+        # fallback zeros
+        return np.zeros((1, N_MFCC, 1), dtype=np.float32)
 
 def predict_audio(model, file_bytes):
-    """Final accurate prediction."""
-    mfcc = compute_mfcc(file_bytes)
-    x = prepare_input(mfcc)
-
-    probs = model.predict(x)[0]
-    probs = np.array(probs).flatten()
-
-    # Fix mismatches
-    if len(probs) != len(EMO_LABELS):
-        corrected = np.zeros(len(EMO_LABELS))
-        corrected[:min(len(probs), len(corrected))] = probs[:min(len(probs), len(corrected))]
-        probs = corrected
-
-    idx = int(np.argmax(probs))
-    return EMO_LABELS[idx], float(probs[idx]), probs
+    """
+    Predict using correct preprocessing. Returns label, confidence, probs
+    Ensures probs length matches EMO_LABELS (pads/truncates if needed).
+    """
+    try:
+        mfcc = compute_mfcc(file_bytes)
+        x = prepare_input(mfcc)
+        preds = model.predict(x)
+        probs = np.array(preds).flatten()
+        # sanitize length
+        if probs.size != len(EMO_LABELS):
+            fixed = np.zeros(len(EMO_LABELS), dtype=float)
+            fixed[:min(len(probs), len(fixed))] = probs[:min(len(probs), len(fixed))]
+            probs = fixed
+        idx = int(np.argmax(probs))
+        return EMO_LABELS[idx], float(probs[idx]), probs
+    except Exception:
+        # final uniform fallback
+        probs = np.ones(len(EMO_LABELS), dtype=float) / len(EMO_LABELS)
+        return "neutral", float(probs[0]), probs
 
 # --------------------------------------------------------
-# SIDEBAR
+# SIDEBAR NAVIGATION
 # --------------------------------------------------------
 with st.sidebar:
     st.title("Navigation")
@@ -153,31 +197,24 @@ if page == "Home":
     st.title("Speech Emotion Recognition System")
 
     st.write(
-        """
-        This system analyzes short speech clips and identifies the emotion expressed
-        by the speaker. By understanding vocal tone and frequency patterns, the model 
-        recognizes emotional cues such as happiness, sadness, anger, fear, and more.
-        """
+        "This application analyzes short speech clips and identifies the emotion expressed by the speaker. "
+        "It works by learning vocal patterns—tone, pitch, and spectral energy changes—and mapping them to emotion categories."
     )
 
-    st.subheader("Why this matters")
+    st.subheader("Why this system is useful")
     st.write(
-        """
-        - Enhances customer support by detecting frustration or satisfaction  
-        - Supports mental health monitoring  
-        - Helps build emotion-aware assistants & interfaces  
-        - Assists researchers in analyzing emotional speech patterns  
-        """
+        "- Detects customer frustration or satisfaction\n"
+        "- Supports non-invasive emotion monitoring for wellbeing\n"
+        "- Enhances conversational AI with emotional context\n"
+        "- Useful for research and education"
     )
 
-    st.subheader("How it works")
+    st.subheader("How it works (simple)")
     st.write(
-        """
-        1. You upload a speech audio clip  
-        2. The system computes MFCC sound signatures  
-        3. It collapses the information into a representation your model understands  
-        4. The neural network predicts the closest emotion  
-        """
+        "1. Upload a short audio clip.\n"
+        "2. The system extracts compact sound features (MFCCs).\n"
+        "3. The features are collapsed to the representation the model expects.\n"
+        "4. A trained neural network returns the most likely emotion with a confidence score."
     )
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -188,26 +225,33 @@ if page == "Home":
 elif page == "Make Prediction":
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.title("Emotion Prediction")
+    st.write("Upload a short audio file (recommended 1–8 seconds).")
 
     audio_file = st.file_uploader("Upload an audio file", type=["wav", "mp3", "ogg", "flac", "m4a"])
 
     if audio_file is not None:
         file_bytes = audio_file.read()
-        st.audio(file_bytes)
+        # show audio player
+        st.audio(file_bytes, format=audio_file.type if hasattr(audio_file, "type") else "audio/wav")
 
-        with st.spinner("Analyzing emotion..."):
+        # load model
+        try:
             model = load_emotion_model()
-            label, conf, probs = predict_audio(model, file_bytes)
-            time.sleep(0.2)
+        except Exception:
+            st.error("Could not load model (model.h5). Please ensure model.h5 is present in the repo root.")
+            st.stop()
 
+        # predict (safe)
+        label, conf, probs = predict_audio(model, file_bytes)
+
+        # present result
         st.subheader("Predicted Emotion")
         st.success(f"{label.capitalize()}   —   Confidence: {conf:.2f}")
 
-        # Chart for probabilities
-        prob_df = pd.DataFrame({
-            "Emotion": EMO_LABELS,
-            "Probability": probs
-        }).sort_values("Probability", ascending=False)
+        # descriptive probability chart
+        prob_df = pd.DataFrame({"Emotion": EMO_LABELS, "Probability": probs})
+        prob_df = prob_df.sort_values("Probability", ascending=False).reset_index(drop=True)
+        prob_df["Percent"] = (prob_df["Probability"] * 100).round(1)
 
         fig = px.bar(
             prob_df,
@@ -215,13 +259,14 @@ elif page == "Make Prediction":
             y="Probability",
             color="Emotion",
             color_discrete_sequence=px.colors.sequential.Pinkyl,
-            title="Emotion Probability Distribution (Sorted)"
+            title="Emotion Probability Distribution (sorted)"
         )
-        fig.update_layout(showlegend=False)
+        fig.update_traces(text=prob_df["Percent"].astype(str) + "%", textposition="outside")
+        fig.update_layout(showlegend=False, yaxis=dict(range=[0, 1]))
         st.plotly_chart(fig, use_container_width=True)
 
     else:
-        st.info("Upload an audio file to start.")
+        st.info("Upload an audio file to begin.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -233,33 +278,26 @@ elif page == "About":
     st.title("About This Project")
 
     st.write(
-        """
-        The Speech Emotion Recognition System identifies human emotion from voice
-        by analyzing frequency patterns and vocal tone changes. It transforms speech 
-        into MFCC signatures and uses a deep learning model to map these signatures 
-        to emotional categories.
-        """
+        "The Speech Emotion Recognition System detects emotions from short voice clips. "
+        "It uses audio features and a trained neural network to understand the emotional tone of speech."
     )
 
-    st.subheader("Use Cases")
+    st.subheader("Use cases")
     st.write(
-        """
-        - Customer care emotion tracking  
-        - Mental health and wellbeing tools  
-        - Emotion-aware digital assistants  
-        - Research and educational purposes  
-        """
+        "- Customer support sentiment monitoring\n"
+        "- Mental health & wellbeing tools\n"
+        "- Emotion-aware conversational agents\n"
+        "- Research and educational studies"
     )
 
-    st.subheader("Goal")
+    st.subheader("How it works (plain language)")
     st.write(
-        """
-        The goal is to enable emotionally intuitive technology—systems that understand 
-        not only speech content but also the feeling behind it.
-        """
+        "The app converts sound into a compact fingerprint (MFCC), collapses the time information into the form the model expects, "
+        "and the trained model then maps that fingerprint to a likely emotion. The app shows the top emotion and a clear probability chart."
     )
 
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 
