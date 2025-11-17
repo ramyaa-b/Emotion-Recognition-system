@@ -1,0 +1,12 @@
+streamlit>=1.18
+tensorflow==2.20.0
+numpy
+librosa
+soundfile
+pandas
+joblib
+
+
+
+
+
